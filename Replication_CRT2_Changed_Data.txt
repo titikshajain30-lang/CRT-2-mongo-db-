@@ -1,0 +1,536 @@
+Microsoft Windows [Version 10.0.19045.3693]
+(c) Microsoft Corporation. All rights reserved.
+
+
+=====================================================================
+TASK 1: PURPOSE AND SETUP OF REPLICATION
+=====================================================================
+
+C:\Users\Student> mongod --version
+db version v7.0.12
+
+C:\Users\Student> REM Purpose of replication:
+C:\Users\Student> REM   1. High availability  (automatic failover if a server dies)
+C:\Users\Student> REM   2. Data redundancy    (same data on several servers)
+C:\Users\Student> REM   3. Read scaling       (reads can be served by secondaries)
+C:\Users\Student> REM   4. Backups / reporting without hitting the primary
+
+----- 1.1 Create data folders for 3 members -----
+
+C:\Users\Student> mkdir C:\data\rs0-0 C:\data\rs0-1 C:\data\rs0-2
+C:\Users\Student> mkdir C:\data\logs
+
+----- 1.2 Start 3 mongod instances (each opens in its own cmd window) -----
+
+C:\Users\Student> start "Node1-27017" mongod --replSet rs0 --port 27017 --dbpath C:\data\rs0-0 --bind_ip localhost --oplogSize 128 --logpath C:\data\logs\node1.log
+C:\Users\Student> start "Node2-27018" mongod --replSet rs0 --port 27018 --dbpath C:\data\rs0-1 --bind_ip localhost --oplogSize 128 --logpath C:\data\logs\node2.log
+C:\Users\Student> start "Node3-27019" mongod --replSet rs0 --port 27019 --dbpath C:\data\rs0-2 --bind_ip localhost --oplogSize 128 --logpath C:\data\logs\node3.log
+
+C:\Users\Student> tasklist | findstr mongod
+mongod.exe                    8124 Console                    1    212,640 K
+mongod.exe                    9376 Console                    1    208,112 K
+mongod.exe                   10248 Console                    1    205,984 K
+
+----- 1.3 Connect to the first node and initiate the replica set -----
+
+C:\Users\Student> mongosh --port 27017
+Current Mongosh Log ID: 6720a1f3c4d5e6f7a8b9c0d1
+Connecting to:   mongodb://127.0.0.1:27017/?directConnection=true
+Using MongoDB:   7.0.12
+Using Mongosh:   2.2.10
+
+test> rs.status()
+MongoServerError: no replset config has been received
+
+test> rs.initiate({
+...   _id: "rs0",
+...   members: [
+...     { _id: 0, host: "localhost:27017" },
+...     { _id: 1, host: "localhost:27018" },
+...     { _id: 2, host: "localhost:27019" }
+...   ]
+... })
+{ ok: 1 }
+
+rs0 [direct: secondary] test>
+rs0 [direct: primary] test>
+
+----- 1.4 Check the replica set status -----
+
+rs0 [direct: primary] test> rs.status().members.map(m => ({ name: m.name, state: m.stateStr, health: m.health }))
+[
+  { name: 'localhost:27017', state: 'PRIMARY',   health: 1 },
+  { name: 'localhost:27018', state: 'SECONDARY', health: 1 },
+  { name: 'localhost:27019', state: 'SECONDARY', health: 1 }
+]
+
+rs0 [direct: primary] test> rs.conf()
+{
+  _id: 'rs0',
+  version: 1,
+  term: 1,
+  members: [
+    { _id: 0, host: 'localhost:27017', arbiterOnly: false, hidden: false, priority: 1, votes: 1, secondaryDelaySecs: Long('0') },
+    { _id: 1, host: 'localhost:27018', arbiterOnly: false, hidden: false, priority: 1, votes: 1, secondaryDelaySecs: Long('0') },
+    { _id: 2, host: 'localhost:27019', arbiterOnly: false, hidden: false, priority: 1, votes: 1, secondaryDelaySecs: Long('0') }
+  ],
+  settings: { heartbeatIntervalMillis: 2000, electionTimeoutMillis: 10000, ... }
+}
+
+rs0 [direct: primary] test> db.hello()
+{
+  isWritablePrimary: true,
+  secondary: false,
+  setName: 'rs0',
+  hosts: [ 'localhost:27017', 'localhost:27018', 'localhost:27019' ],
+  primary: 'localhost:27017',
+  me: 'localhost:27017',
+  ok: 1
+}
+
+
+=====================================================================
+TASK 2: PRIMARY AND SECONDARY (Roles and purposes)
+=====================================================================
+
+REM Primary   : only node that accepts WRITES. Records all changes in the oplog.
+REM Secondary : copies the primary's oplog and applies it. Can serve reads
+REM             (only if read preference allows). Can become primary in election.
+
+----- 2.1 Write data on the PRIMARY -----
+
+rs0 [direct: primary] test> use collegeDB
+switched to db collegeDB
+
+rs0 [direct: primary] collegeDB> db.employees.insertMany([
+...  { _id: 1, name: "Aarav", department: "Engineering", salary: 52000 },
+...  { _id: 2, name: "Diya", department: "Analytics", salary: 68000 },
+...  { _id: 3, name: "Rohan",  department: "Engineering", salary: 45000 },
+...  { _id: 4, name: "Ananya", department: "Management", salary: 61000 },
+...  { _id: 5, name: "Vivaan", department: "Engineering", salary: 49000 }
+... ])
+{ acknowledged: true, insertedIds: { '0': 1, '1': 2, '2': 3, '3': 4, '4': 5 } }
+
+----- 2.2 Look at the OPLOG (the replication log) -----
+
+rs0 [direct: primary] collegeDB> use local
+switched to db local
+
+rs0 [direct: primary] local> db.oplog.rs.find({ ns: "collegeDB.employees" }).limit(2)
+[
+  {
+    op: 'i',
+    ns: 'collegeDB.employees',
+    o: { _id: 1, name: 'Aarav', department: 'Engineering', salary: 52000 },
+    ts: Timestamp({ t: 1730000123, i: 1 }),
+    t: Long('1'),
+    wall: ISODate('2026-10-27T05:42:03.114Z')
+  },
+  { op: 'i', ns: 'collegeDB.employees', o: { _id: 2, name: 'Diya', ... }, ts: Timestamp({ t: 1730000123, i: 2 }), ... }
+]
+
+rs0 [direct: primary] local> rs.printReplicationInfo()
+actual oplog size
+'128 MB'
+configured oplog size
+'128 MB'
+log length start to end
+'412secs (0.11hrs)'
+oplog first event time
+'Tue Oct 27 2026 05:35:11 GMT+0530 (India Standard Time)'
+oplog last event time
+'Tue Oct 27 2026 05:42:03 GMT+0530 (India Standard Time)'
+now
+'Tue Oct 27 2026 05:42:09 GMT+0530 (India Standard Time)'
+
+----- 2.3 Connect to a SECONDARY (new cmd window) -----
+
+C:\Users\Student> mongosh --port 27018
+rs0 [direct: secondary] test> use collegeDB
+switched to db collegeDB
+
+rs0 [direct: secondary] collegeDB> db.employees.find()
+MongoServerError: not primary and secondaryOk=false - consider using db.getMongo().setReadPref() or readPreference in the connection string
+
+rs0 [direct: secondary] collegeDB> // Reads on a secondary are refused until a read preference allows it.
+
+rs0 [direct: secondary] collegeDB> db.getMongo().setReadPref("secondaryPreferred")
+
+rs0 [direct: secondary] collegeDB> db.employees.find()
+[
+  { _id: 1, name: 'Aarav', department: 'Engineering', salary: 52000 },
+  { _id: 2, name: 'Diya', department: 'Analytics', salary: 68000 },
+  { _id: 3, name: 'Rohan', department: 'Engineering', salary: 45000 },
+  { _id: 4, name: 'Ananya', department: 'Management', salary: 61000 },
+  { _id: 5, name: 'Vivaan', department: 'Engineering', salary: 49000 }
+]
+rs0 [direct: secondary] collegeDB> // Data was replicated from the primary.
+
+----- 2.4 Try to WRITE on a secondary -----
+
+rs0 [direct: secondary] collegeDB> db.employees.insertOne({ _id: 99, name: "Test" })
+MongoServerError: not primary
+
+rs0 [direct: secondary] collegeDB> // Only the primary accepts writes.
+
+----- 2.5 Check replication lag -----
+
+rs0 [direct: primary] test> rs.printSecondaryReplicationInfo()
+source: localhost:27018
+{
+  syncedTo: 'Tue Oct 27 2026 05:42:03 GMT+0530 (India Standard Time)',
+  replLag: '0 secs (0 hrs) behind the primary '
+}
+---
+source: localhost:27019
+{
+  syncedTo: 'Tue Oct 27 2026 05:42:03 GMT+0530 (India Standard Time)',
+  replLag: '0 secs (0 hrs) behind the primary '
+}
+
+----- 2.6 Add special members (info) -----
+
+rs0 [direct: primary] test> // rs.add({ host: "localhost:27020", priority: 0, hidden: true })   --> hidden member for backups/reports
+rs0 [direct: primary] test> // rs.add({ host: "localhost:27021", secondaryDelaySecs: 3600, priority: 0, hidden: true })  --> delayed member
+rs0 [direct: primary] test> // rs.addArb("localhost:27022")  --> arbiter: votes only, holds NO data
+
+
+=====================================================================
+TASK 3: READ PREFERENCE (consistency and performance)
+=====================================================================
+
+REM Modes:
+REM   primary             -> default. All reads from primary. Strongest consistency.
+REM   primaryPreferred    -> primary, but secondary if primary is down.
+REM   secondary           -> only secondaries. Reads may be slightly stale.
+REM   secondaryPreferred  -> secondary, but primary if no secondary is available.
+REM   nearest             -> lowest network latency member (any member).
+
+----- 3.1 Set read preference in the shell -----
+
+C:\Users\Student> mongosh "mongodb://localhost:27017,localhost:27018,localhost:27019/?replicaSet=rs0"
+rs0 [primary] test> use collegeDB
+switched to db collegeDB
+
+rs0 [primary] collegeDB> db.getMongo().getReadPrefMode()
+primary
+
+rs0 [primary] collegeDB> db.getMongo().setReadPref("secondary")
+rs0 [primary] collegeDB> db.getMongo().getReadPrefMode()
+secondary
+
+----- 3.2 Set read preference per query -----
+
+rs0 [primary] collegeDB> db.employees.find({ department: "Engineering" }).readPref("secondary")
+rs0 [primary] collegeDB> db.employees.find({ department: "Engineering" }).readPref("nearest")
+rs0 [primary] collegeDB> db.employees.find({ department: "Engineering" }).readPref("primaryPreferred")
+
+----- 3.3 Set read preference in the connection string -----
+
+C:\Users\Student> mongosh "mongodb://localhost:27017,localhost:27018,localhost:27019/?replicaSet=rs0&readPreference=secondaryPreferred"
+
+----- 3.4 Prove which member served the read -----
+
+rs0 [primary] collegeDB> db.employees.find().readPref("secondary").explain().serverInfo.port
+27019
+rs0 [primary] collegeDB> db.employees.find().readPref("primary").explain().serverInfo.port
+27017
+
+----- 3.5 maxStalenessSeconds (avoid very stale secondaries) -----
+
+rs0 [primary] collegeDB> db.employees.find().readPref("secondary", null, 90)
+rs0 [primary] collegeDB> // Secondary is skipped if it is more than 90 seconds behind. (Minimum allowed value is 90.)
+
+C:\Users\Student> mongosh "mongodb://localhost:27017,localhost:27018,localhost:27019/?replicaSet=rs0&readPreference=secondary&maxStalenessSeconds=120"
+
+----- 3.6 Tag sets (read from a specific kind of member) -----
+
+rs0 [primary] collegeDB> cfg = rs.conf()
+rs0 [primary] collegeDB> cfg.members[1].tags = { use: "reporting", region: "jaipur" }
+{ use: 'reporting', region: 'jaipur' }
+rs0 [primary] collegeDB> rs.reconfig(cfg)
+{ ok: 1, ... }
+
+rs0 [primary] collegeDB> db.employees.find().readPref("secondary", [ { use: "reporting" }, {} ])
+rs0 [primary] collegeDB> // Try a member tagged use=reporting, else fall back to any secondary ({}).
+
+----- 3.7 Read Concern (consistency of the data read) -----
+
+rs0 [primary] collegeDB> db.employees.find().readConcern("local")
+rs0 [primary] collegeDB> db.employees.find().readConcern("majority")
+rs0 [primary] collegeDB> // "majority" only returns data that is acknowledged by a majority, so it will not be rolled back.
+
+----- 3.8 Stale read demonstration -----
+
+rs0 [primary] collegeDB> db.employees.insertOne({ _id: 6, name: "Meera", department: "Analytics", salary: 57000 })
+rs0 [primary] collegeDB> db.employees.find({ _id: 6 }).readPref("secondary")
+[ { _id: 6, name: 'Meera', department: 'Analytics', salary: 57000 } ]
+rs0 [primary] collegeDB> // Usually visible in milliseconds. Under heavy load or lag a secondary may return [] (stale read).
+
+REM Summary: primary = consistent, secondary/nearest = faster and scalable but may be stale.
+
+
+=====================================================================
+TASK 4: WRITE CONCERN (Ensuring data durability)
+=====================================================================
+
+REM Write concern = how many members must confirm a write before it is acknowledged.
+REM   w: 0          -> no acknowledgement (fire and forget)
+REM   w: 1          -> primary only (default for older versions)
+REM   w: "majority" -> majority of voting members (default in MongoDB 5.0+)
+REM   w: 3          -> a specific number of members
+REM   j: true       -> wait until written to the on-disk journal
+REM   wtimeout      -> max time (ms) to wait for the acknowledgement
+
+----- 4.1 Check the default write concern -----
+
+rs0 [primary] collegeDB> db.adminCommand({ getDefaultRWConcern: 1 })
+{
+  defaultWriteConcern: { w: 'majority', wtimeout: 0 },
+  defaultReadConcern: { level: 'local' },
+  ok: 1
+}
+
+----- 4.2 Different write concerns -----
+
+rs0 [primary] collegeDB> db.employees.insertOne({ _id: 7, name: "Arjun", department: "Engineering", salary: 55000 }, { writeConcern: { w: 1 } })
+{ acknowledged: true, insertedId: 7 }
+
+rs0 [primary] collegeDB> db.employees.insertOne({ _id: 8, name: "Kavya", department: "Management", salary: 63000 }, { writeConcern: { w: "majority", wtimeout: 5000 } })
+{ acknowledged: true, insertedId: 8 }
+
+rs0 [primary] collegeDB> db.employees.insertOne({ _id: 9, name: "Ishaan", department: "Analytics", salary: 59000 }, { writeConcern: { w: 3, j: true, wtimeout: 5000 } })
+{ acknowledged: true, insertedId: 9 }
+
+rs0 [primary] collegeDB> db.employees.insertOne({ _id: 10, name: "Aditi", department: "Engineering", salary: 51000 }, { writeConcern: { w: 0 } })
+{ acknowledged: false }
+rs0 [primary] collegeDB> // w:0 -> no confirmation, so errors would not be reported.
+
+----- 4.3 Write concern on update and delete -----
+
+rs0 [primary] collegeDB> db.employees.updateOne({ _id: 1 }, { $inc: { salary: 5 } }, { writeConcern: { w: "majority", j: true } })
+{ acknowledged: true, matchedCount: 1, modifiedCount: 1, ... }
+
+rs0 [primary] collegeDB> db.employees.deleteOne({ _id: 10 }, { writeConcern: { w: "majority" } })
+{ acknowledged: true, deletedCount: 1 }
+
+----- 4.4 Set a cluster-wide default write concern -----
+
+rs0 [primary] collegeDB> db.adminCommand({
+...   setDefaultRWConcern: 1,
+...   defaultWriteConcern: { w: "majority", wtimeout: 5000 }
+... })
+{
+  defaultWriteConcern: { w: 'majority', wtimeout: 5000 },
+  defaultReadConcern: { level: 'local' },
+  ok: 1
+}
+
+----- 4.5 ERROR: Write concern cannot be satisfied (a member is down) -----
+
+REM In Node3 window I pressed Ctrl+C to stop 27019. Now only 2 members are up.
+
+rs0 [primary] collegeDB> db.employees.insertOne({ _id: 11, name: "Kabir", department: "Management", salary: 47000 }, { writeConcern: { w: 3, wtimeout: 3000 } })
+MongoWriteConcernError: waiting for replication timed out
+Additional information: {
+  wtimeout: true,
+  code: 64,
+  codeName: 'WriteConcernTimeout'
+}
+
+rs0 [primary] collegeDB> db.employees.find({ _id: 11 })
+[ { _id: 11, name: 'Kabir', department: 'Management', salary: 47000 } ]
+rs0 [primary] collegeDB> // Important: the write DID happen on the primary. Only the acknowledgement failed.
+
+rs0 [primary] collegeDB> db.employees.insertOne({ _id: 12, name: "Yash", department: "Engineering", salary: 53000 }, { writeConcern: { w: "majority", wtimeout: 3000 } })
+{ acknowledged: true, insertedId: 12 }
+rs0 [primary] collegeDB> // 2 of 3 members = majority, so this one succeeds.
+
+----- 4.6 ERROR: Impossible write concern -----
+
+rs0 [primary] collegeDB> db.employees.insertOne({ _id: 13, name: "Test" }, { writeConcern: { w: 5 } })
+MongoServerError: Not enough data-bearing nodes
+rs0 [primary] collegeDB> // w: 5 is more than the 3 members in the set.
+
+REM Restart Node3 again
+C:\Users\Student> start "Node3-27019" mongod --replSet rs0 --port 27019 --dbpath C:\data\rs0-2 --bind_ip localhost --oplogSize 128 --logpath C:\data\logs\node3.log
+
+rs0 [primary] collegeDB> rs.status().members.map(m => m.name + " -> " + m.stateStr)
+[
+  'localhost:27017 -> PRIMARY',
+  'localhost:27018 -> SECONDARY',
+  'localhost:27019 -> SECONDARY'
+]
+rs0 [primary] collegeDB> db.employees.find({ _id: { $in: [11, 12] } }).readPref("secondary").count()
+2
+rs0 [primary] collegeDB> // Node3 caught up using the oplog.
+
+
+=====================================================================
+TASK 5: ELECTIONS (Handling primary failure)
+=====================================================================
+
+REM Election rules:
+REM   - Members send heartbeats every 2 seconds.
+REM   - If the primary is not heard from for 10 seconds (electionTimeoutMillis),
+REM     an eligible secondary calls an election.
+REM   - A candidate needs votes from a MAJORITY of voting members (2 of 3).
+REM   - The member with higher priority and the most up-to-date oplog is favoured.
+REM   - Each election increases the "term" number.
+REM   - Without a majority, NO primary is elected and the set becomes read-only.
+
+----- 5.1 Check current state -----
+
+rs0 [primary] collegeDB> rs.status().members.map(m => m.name + " -> " + m.stateStr)
+[
+  'localhost:27017 -> PRIMARY',
+  'localhost:27018 -> SECONDARY',
+  'localhost:27019 -> SECONDARY'
+]
+rs0 [primary] collegeDB> rs.status().term
+1
+
+----- 5.2 Simulate PRIMARY FAILURE: stop the primary (Ctrl+C in Node1 window) -----
+
+C:\Data\logs> REM Node1 window: ^C   (mongod 27017 stopped)
+
+----- 5.3 Connect to a surviving member and watch the election -----
+
+C:\Users\Student> mongosh --port 27018
+rs0 [direct: secondary] test> rs.status().members.map(m => m.name + " -> " + m.stateStr)
+[
+  'localhost:27017 -> (not reachable/healthy)',
+  'localhost:27018 -> SECONDARY',
+  'localhost:27019 -> SECONDARY'
+]
+
+REM ... about 10-12 seconds later ...
+
+rs0 [direct: primary] test> rs.status().members.map(m => m.name + " -> " + m.stateStr)
+[
+  'localhost:27017 -> (not reachable/healthy)',
+  'localhost:27018 -> PRIMARY',
+  'localhost:27019 -> SECONDARY'
+]
+
+rs0 [direct: primary] test> rs.status().term
+2
+rs0 [direct: primary] test> // Term went 1 -> 2, so an election happened. 27018 is the new primary.
+
+rs0 [direct: primary] test> rs.status().electionCandidateMetrics
+{
+  lastElectionReason: 'electionTimeout',
+  lastElectionDate: ISODate('2026-10-27T06:03:44.201Z'),
+  electionTerm: Long('2'),
+  numVotesNeeded: 2,
+  priorityAtElection: 1,
+  electionTimeoutMillis: Long('10000'),
+  ...
+}
+
+----- 5.4 Writes continue on the new primary -----
+
+rs0 [direct: primary] test> use collegeDB
+rs0 [direct: primary] collegeDB> db.employees.insertOne({ _id: 14, name: "NewEmployee", department: "Engineering", salary: 72000 })
+{ acknowledged: true, insertedId: 14 }
+
+----- 5.5 Old primary rejoins as a SECONDARY -----
+
+C:\Users\Student> start "Node1-27017" mongod --replSet rs0 --port 27017 --dbpath C:\data\rs0-0 --bind_ip localhost --oplogSize 128 --logpath C:\data\logs\node1.log
+
+rs0 [direct: primary] collegeDB> rs.status().members.map(m => m.name + " -> " + m.stateStr)
+[
+  'localhost:27017 -> SECONDARY',
+  'localhost:27018 -> PRIMARY',
+  'localhost:27019 -> SECONDARY'
+]
+
+C:\Users\Student> mongosh --port 27017
+rs0 [direct: secondary] test> db.getSiblingDB("collegeDB").employees.find({ _id: 14 }).readPref("secondary")
+[ { _id: 14, name: 'NewEmployee', department: 'Engineering', salary: 72000 } ]
+rs0 [direct: secondary] test> // Old primary synced the missed write from the new primary.
+
+----- 5.6 Planned failover: rs.stepDown() -----
+
+rs0 [direct: primary] collegeDB> rs.stepDown(60)
+MongoServerError: ... connection closed (the primary steps down and drops client connections)
+
+rs0 [direct: secondary] collegeDB> rs.status().members.map(m => m.name + " -> " + m.stateStr)
+[
+  'localhost:27017 -> PRIMARY',
+  'localhost:27018 -> SECONDARY',
+  'localhost:27019 -> SECONDARY'
+]
+rs0 [direct: primary] collegeDB> // stepDown(60): the old primary cannot be re-elected for 60 seconds.
+
+----- 5.7 Control elections with PRIORITY -----
+
+rs0 [direct: primary] test> cfg = rs.conf()
+rs0 [direct: primary] test> cfg.members[0].priority = 5
+rs0 [direct: primary] test> cfg.members[1].priority = 1
+rs0 [direct: primary] test> cfg.members[2].priority = 0
+rs0 [direct: primary] test> rs.reconfig(cfg)
+{ ok: 1, ... }
+
+rs0 [direct: primary] test> rs.conf().members.map(m => m.host + "  priority=" + m.priority)
+[
+  'localhost:27017  priority=5',
+  'localhost:27018  priority=1',
+  'localhost:27019  priority=0'
+]
+REM priority 5 -> preferred primary
+REM priority 0 -> can vote, but can NEVER become primary
+
+----- 5.8 Force an election -----
+
+rs0 [direct: primary] test> rs.stepDown()
+rs0 [direct: primary] test> rs.freeze(120)
+REM freeze(120) on a secondary: it will not seek election for 120 seconds. rs.freeze(0) cancels it.
+
+----- 5.9 ERROR: No majority = no primary -----
+
+REM Stopped both 27018 and 27019 so only 1 of 3 voting members is alive.
+
+rs0 [direct: secondary] test> rs.status().members.map(m => m.name + " -> " + m.stateStr)
+[
+  'localhost:27017 -> SECONDARY',
+  'localhost:27018 -> (not reachable/healthy)',
+  'localhost:27019 -> (not reachable/healthy)'
+]
+
+rs0 [direct: secondary] test> db.getSiblingDB("collegeDB").employees.insertOne({ _id: 50, name: "X" })
+MongoServerError: not primary
+
+rs0 [direct: secondary] test> // Lone member cannot get 2 votes, so it stays SECONDARY (read-only).
+rs0 [direct: secondary] test> // Fix: bring the other members back. This is why an ODD number of voting members is recommended.
+
+REM Restarted 27018 and 27019 -> election runs -> 27017 became PRIMARY again.
+
+----- 5.10 Rollback (info) -----
+
+REM If an old primary had writes that never replicated to a majority, those writes are
+REM ROLLED BACK when it rejoins. Using w:"majority" prevents losing acknowledged writes.
+
+----- 5.11 Remove a member / shut down properly -----
+
+rs0 [direct: primary] test> rs.remove("localhost:27019")
+{ ok: 1 }
+rs0 [direct: primary] test> rs.add("localhost:27019")
+{ ok: 1 }
+
+rs0 [direct: primary] test> use admin
+rs0 [direct: primary] admin> db.shutdownServer()
+
+
+=====================================================================
+FINAL CHECK
+=====================================================================
+
+C:\Users\Student> mongosh "mongodb://localhost:27017,localhost:27018,localhost:27019/?replicaSet=rs0"
+rs0 [primary] test> rs.isMaster().primary
+localhost:27017
+rs0 [primary] test> rs.status().set
+rs0
+rs0 [primary] test> exit
+
+C:\Users\Student>

@@ -1,0 +1,503 @@
+Microsoft Windows [Version 10.0.19045.3693]
+(c) Microsoft Corporation. All rights reserved.
+
+C:\Users\Employee> mongosh
+Current Mongosh Log ID: 671e4a1c9b2f3d5a7c8e1f20
+Connecting to:   mongodb://127.0.0.1:27017/?directConnection=true
+Using MongoDB:   7.0.12
+Using Mongosh:   2.2.10
+
+test> use companyDB
+switched to db companyDB
+
+companyDB> show collections
+
+companyDB>
+
+
+=====================================================================
+TASK 0: CREATE SAMPLE DATA
+=====================================================================
+
+companyDB> db.employees.insertMany([
+...  { name: "Aarav",  email: "aarav@example.com",  age: 24, city: "Bengaluru", department: "Engineering",  salary: 52000, skills: ["excel","salesforce"] },
+...  { name: "Diya",  email: "priya@example.com",  age: 26, city: "Hyderabad",  department: "Analytics",  salary: 76000000, skills: ["powerbi","crm"] },
+...  { name: "Rohan",   email: "amit@example.com",   age: 28, city: "Bengaluru", department: "Engineering",  salary: 43000, skills: ["communication","reporting"] },
+...  { name: "Ananya",  email: "sneha@example.com",  age: 28, city: "Chennai",   department: "Management",  salary: 67000, skills: ["excel","salesforce"] },
+...  { name: "Vivaan",  email: "karan@example.com",  age: 24, city: "Hyderabad",  department: "Engineering",  salary: 49000, skills: ["excel","crm"] },
+...  { name: "Meera",   email: "neha@example.com",   age: 26, city: "Bengaluru", department: "Analytics",  salary: 76000, skills: ["powerbi","excel"] }
+... ])
+{
+  acknowledged: true,
+  insertedIds: {
+    '0': ObjectId('671e4a5e9b2f3d5a7c8e1f21'),
+    '1': ObjectId('671e4a5e9b2f3d5a7c8e1f22'),
+    '2': ObjectId('671e4a5e9b2f3d5a7c8e1f23'),
+    '3': ObjectId('671e4a5e9b2f3d5a7c8e1f24'),
+    '4': ObjectId('671e4a5e9b2f3d5a7c8e1f25'),
+    '5': ObjectId('671e4a5e9b2f3d5a7c8e1f26')
+  }
+}
+
+companyDB> db.employees.countDocuments()
+6
+
+companyDB> // Add more data so index behaviour is easier to see
+companyDB> for (let i = 1; i <= 50000; i++) {
+...   db.employees.insertOne({
+...     name: "Employee" + i,
+...     email: "employee" + i + "@example.com",
+...     age: 22 + (i % 15),
+...     city: ["Bengaluru","Hyderabad","Chennai","Noida","Gurugram"][i % 5],
+...     department: ["Engineering","Analytics","Management","Design"][i % 4],
+...     salary: 35000 + Math.floor(Math.random() * 65000),
+...     skills: ["excel","powerbi","salesforce","crm","communication"].slice(i % 3, (i % 3) + 2)
+...   })
+... }
+{
+  acknowledged: true,
+  insertedId: ObjectId('671e4b1f9b2f3d5a7c8f0a00')
+}
+
+companyDB> db.employees.countDocuments()
+50006
+
+
+=====================================================================
+TASK 1: INDEX CREATION (to improve query performance)
+=====================================================================
+
+companyDB> // Step 1: see existing indexes (only default _id index)
+companyDB> db.employees.getIndexes()
+[ { v: 2, key: { _id: 1 }, name: '_id_' } ]
+
+companyDB> // Step 2: query WITHOUT an index
+companyDB> db.employees.find({ email: "employee45000@example.com" }).explain("executionStats").executionStats
+{
+  executionSuccess: true,
+  nReturned: 1,
+  executionTimeMillis: 38,
+  totalKeysExamined: 0,
+  totalDocsExamined: 50006,
+  ...
+}
+
+companyDB> // Step 3: create an index on email
+companyDB> db.employees.createIndex({ email: 1 })
+email_1
+
+companyDB> // Step 4: run the same query again WITH the index
+companyDB> db.employees.find({ email: "employee45000@example.com" }).explain("executionStats").executionStats
+{
+  executionSuccess: true,
+  nReturned: 1,
+  executionTimeMillis: 0,
+  totalKeysExamined: 1,
+  totalDocsExamined: 1,
+  ...
+}
+
+companyDB> // Result: 50006 docs scanned  -->  1 doc scanned
+
+
+=====================================================================
+TASK 2: INDEX TYPES
+=====================================================================
+
+----- 2.1 SINGLE FIELD INDEX -----
+
+companyDB> db.employees.createIndex({ salary: -1 })
+salary_-1
+
+companyDB> db.employees.createIndex({ city: 1 }, { name: "idx_city" })
+idx_city
+
+----- 2.2 COMPOUND INDEX -----
+
+companyDB> db.employees.createIndex({ department: 1, salary: -1 })
+department_1_salary_-1
+
+companyDB> db.employees.find({ department: "Engineering", salary: { $gt: 80000 } }).explain().queryPlanner.winningPlan
+{
+  stage: 'FETCH',
+  inputStage: {
+    stage: 'IXSCAN',
+    keyPattern: { department: 1, salary: -1 },
+    indexName: 'department_1_salary_-1',
+    isMultiKey: false,
+    direction: 'forward',
+    indexBounds: {
+      department: [ '["Engineering", "Engineering"]' ],
+      salary: [ '[inf.0, 80)' ]
+    }
+  }
+}
+
+----- 2.3 MULTIKEY INDEX (on an array field) -----
+
+companyDB> db.employees.createIndex({ skills: 1 })
+skills_1
+
+companyDB> db.employees.find({ skills: "crm" }).explain().queryPlanner.winningPlan
+{
+  stage: 'FETCH',
+  inputStage: {
+    stage: 'IXSCAN',
+    keyPattern: { skills: 1 },
+    indexName: 'skills_1',
+    isMultiKey: true,
+    multiKeyPaths: { skills: [ 'skills' ] },
+    direction: 'forward',
+    indexBounds: { skills: [ '["crm", "crm"]' ] }
+  }
+}
+
+companyDB> // isMultiKey: true  --> MongoDB created one index entry per array element
+
+----- 2.4 UNIQUE INDEX (bonus) -----
+
+companyDB> db.employees.createIndex({ name: 1, email: 1 }, { unique: true })
+name_1_email_1
+
+----- 2.5 LIST ALL INDEXES -----
+
+companyDB> db.employees.getIndexes()
+[
+  { v: 2, key: { _id: 1 }, name: '_id_' },
+  { v: 2, key: { email: 1 }, name: 'email_1' },
+  { v: 2, key: { salary: -1 }, name: 'salary_-1' },
+  { v: 2, key: { city: 1 }, name: 'idx_city' },
+  { v: 2, key: { department: 1, salary: -1 }, name: 'department_1_salary_-1' },
+  { v: 2, key: { skills: 1 }, name: 'skills_1' },
+  { v: 2, key: { name: 1, email: 1 }, name: 'name_1_email_1', unique: true }
+]
+
+
+=====================================================================
+TASK 3: EXPLAIN PLAN (Identifying performance issues)
+=====================================================================
+
+companyDB> // COLLSCAN = bad (no index used), IXSCAN = good
+companyDB> db.employees.find({ age: 24 }).explain("executionStats")
+{
+  queryPlanner: {
+    namespace: 'companyDB.employees',
+    winningPlan: { stage: 'COLLSCAN', filter: { age: { '$eq': 21 } }, direction: 'forward' },
+    rejectedPlans: []
+  },
+  executionStats: {
+    nReturned: 5001,
+    executionTimeMillis: 41,
+    totalKeysExamined: 0,
+    totalDocsExamined: 50006
+  }
+}
+
+companyDB> // Problem found: stage = COLLSCAN, docsExamined = 50006 for 5001 results
+companyDB> // Fix: create an index on age
+companyDB> db.employees.createIndex({ age: 1 })
+age_1
+
+companyDB> db.employees.find({ age: 24 }).explain("executionStats").executionStats
+{
+  nReturned: 5001,
+  executionTimeMillis: 9,
+  totalKeysExamined: 5001,
+  totalDocsExamined: 5001
+}
+
+companyDB> // Other explain verbosity modes
+companyDB> db.employees.find({ city: "Bengaluru" }).explain("queryPlanner")
+companyDB> db.employees.find({ city: "Bengaluru" }).explain("executionStats")
+companyDB> db.employees.find({ city: "Bengaluru" }).explain("allPlansExecution")
+
+companyDB> // Key things I checked in explain output:
+companyDB> //   stage            -> COLLSCAN or IXSCAN
+companyDB> //   totalKeysExamined vs nReturned
+companyDB> //   totalDocsExamined vs nReturned
+companyDB> //   executionTimeMillis
+companyDB> //   SORT stage       -> in-memory sort (slow)
+
+
+=====================================================================
+TASK 4: HIDDEN INDEX (Purpose and use)
+=====================================================================
+
+companyDB> // Purpose: test what happens if an index is removed, WITHOUT dropping it.
+companyDB> // Hidden index is still maintained on writes but ignored by the query planner.
+
+companyDB> db.employees.hideIndex("idx_city")
+{ hidden_old: false, hidden_new: true, ok: 1 }
+
+companyDB> db.employees.getIndexes().filter(i => i.name == "idx_city")
+[ { v: 2, key: { city: 1 }, name: 'idx_city', hidden: true } ]
+
+companyDB> db.employees.find({ city: "Bengaluru" }).explain().queryPlanner.winningPlan.stage
+COLLSCAN
+
+companyDB> // Query became a COLLSCAN --> this index is needed, so do NOT drop it.
+companyDB> db.employees.unhideIndex("idx_city")
+{ hidden_old: true, hidden_new: false, ok: 1 }
+
+companyDB> db.employees.find({ city: "Bengaluru" }).explain().queryPlanner.winningPlan.stage
+FETCH
+
+companyDB> // Create an index that is hidden from the start
+companyDB> db.employees.createIndex({ department: 1 }, { hidden: true })
+department_1
+
+companyDB> // Alternative using collMod
+companyDB> db.runCommand({
+...   collMod: "employees",
+...   index: { name: "department_1", hidden: false }
+... })
+{ hidden_old: true, hidden_new: false, ok: 1 }
+
+
+=====================================================================
+TASK 5: ERROR HANDLING (Common issues during index creation)
+=====================================================================
+
+----- ERROR 1: DuplicateEmployeelicate key while creating UNIQUE index -----
+
+companyDB> db.employees.insertOne({ name: "DuplicateEmployee", email: "aarav@example.com", age: 25 })
+{ acknowledged: true, insertedId: ObjectId('671e4d0c9b2f3d5a7c8f0a01') }
+
+companyDB> db.employees.createIndex({ email: 1 }, { unique: true, name: "uniq_email" })
+MongoServerError: Index build failed: 3f1a6c2e-8b4d-4e1a-9c77-2d5e0b8f1a90: Collection companyDB.employees ( 7c9d1e44-52a3-4b0f-8e16-aa0c3f9d2b11 ) :: caused by :: E11000 duplicate key error collection: companyDB.employees index: uniq_email dup key: { email: "aarav@example.com" }
+
+companyDB> // Fix: find duplicates, remove them, then create the index again
+companyDB> db.employees.aggregate([
+...   { $group: { _id: "$email", count: { $sum: 1 }, ids: { $push: "$_id" } } },
+...   { $match: { count: { $gt: 1 } } }
+... ])
+[
+  {
+    _id: 'aarav@example.com',
+    count: 2,
+    ids: [ ObjectId('671e4a5e9b2f3d5a7c8e1f21'), ObjectId('671e4d0c9b2f3d5a7c8f0a01') ]
+  }
+]
+
+companyDB> db.employees.deleteOne({ _id: ObjectId('671e4d0c9b2f3d5a7c8f0a01') })
+{ acknowledged: true, deletedCount: 1 }
+
+companyDB> db.employees.dropIndex("email_1")
+{ nIndexesWas: 8, ok: 1 }
+
+companyDB> db.employees.createIndex({ email: 1 }, { unique: true, name: "uniq_email" })
+uniq_email
+
+
+----- ERROR 2: Same name, different options (index conflict) -----
+
+companyDB> db.employees.createIndex({ city: 1 }, { sparse: true })
+MongoServerError: An existing index has the same name as the requested index. When index names are not specified, they are auto generated and can cause conflicts. Please refer to our documentation. Requested index: { v: 2, key: { city: 1 }, name: "city_1", sparse: true }, existing index: { v: 2, key: { city: 1 }, name: "idx_city" }
+
+companyDB> // Note: Same key pattern with different options is not allowed.
+companyDB> // Fix: drop the old index first, or give the new one a different key/option set.
+companyDB> db.employees.dropIndex("idx_city")
+{ nIndexesWas: 8, ok: 1 }
+companyDB> db.employees.createIndex({ city: 1 }, { sparse: true, name: "idx_city_sparse" })
+idx_city_sparse
+
+
+----- ERROR 3: Parallel arrays in a compound index -----
+
+companyDB> db.employees.insertOne({ name: "Test", skills: ["a","b"], hobbies: ["x","y"] })
+{ acknowledged: true, insertedId: ObjectId('671e4e2a9b2f3d5a7c8f0a02') }
+
+companyDB> db.employees.createIndex({ skills: 1, hobbies: 1 })
+MongoServerError: Index build failed: 9a2b...:: caused by :: cannot index parallel arrays [hobbies] [skills]
+
+companyDB> // Rule: a compound index can have at most ONE array field per document.
+companyDB> db.employees.deleteOne({ name: "Test" })
+{ acknowledged: true, deletedCount: 1 }
+
+
+----- ERROR 4: Invalid index specification -----
+
+companyDB> db.employees.createIndex({ age: "abc" })
+MongoServerError: Error in specification { name: "age_abc", key: { age: "abc" } } :: caused by :: Unknown index plugin 'abc'
+
+
+----- ERROR 5: Dropping an index that does not exist -----
+
+companyDB> db.employees.dropIndex("xyz_1")
+MongoServerError: index not found with name [xyz_1]
+
+
+----- ERROR 6: Trying to drop the _id index -----
+
+companyDB> db.employees.dropIndex("_id_")
+MongoServerError: cannot drop _id index
+
+
+----- ERROR 7: DuplicateEmployeelicate insert after unique index exists -----
+
+companyDB> db.employees.insertOne({ name: "RepeatEmployee", email: "aarav@example.com" })
+MongoServerError: E11000 duplicate key error collection: companyDB.employees index: uniq_email dup key: { email: "aarav@example.com" }
+
+
+----- ERROR 8: Too many indexes / index name too long (info) -----
+companyDB> // A collection can have at most 64 indexes.
+companyDB> // Index name + namespace must be within the allowed length limit.
+
+
+=====================================================================
+TASK 6: INDEX VALIDATION (Is my query using an index?)
+=====================================================================
+
+----- 6.1 Using explain() -----
+
+companyDB> db.employees.find({ salary: { $gt: 90000 } }).explain().queryPlanner.winningPlan
+{
+  stage: 'FETCH',
+  inputStage: {
+    stage: 'IXSCAN',
+    keyPattern: { salary: -1 },
+    indexName: 'salary_-1'
+  }
+}
+companyDB> // IXSCAN + indexName  --> index IS being used
+
+----- 6.2 Using hint() to force an index -----
+
+companyDB> db.employees.find({ city: "Hyderabad" }).hint({ city: 1 }).explain().queryPlanner.winningPlan.inputStage.indexName
+idx_city_sparse
+
+companyDB> db.employees.find({ city: "Hyderabad" }).hint({ $natural: 1 }).explain().queryPlanner.winningPlan.stage
+COLLSCAN
+
+----- 6.3 Using $indexStats (how often each index is used) -----
+
+companyDB> db.employees.aggregate([{ $indexStats: {} }]).forEach(i => print(i.name + "  ->  ops: " + i.accesses.ops))
+_id_  ->  ops: 0
+uniq_email  ->  ops: 3
+salary_-1  ->  ops: 2
+department_1_salary_-1  ->  ops: 1
+skills_1  ->  ops: 1
+name_1_email_1  ->  ops: 0
+age_1  ->  ops: 1
+idx_city_sparse  ->  ops: 2
+department_1  ->  ops: 0
+
+companyDB> // Indexes with ops: 0 are candidates to hide and then drop.
+
+----- 6.4 Index size & stats -----
+
+companyDB> db.employees.stats().indexSizes
+{
+  _id_: 540672,
+  uniq_email: 1802240,
+  'salary_-1': 344064,
+  'department_1_salary_-1': 622592,
+  skills_1: 786432,
+  name_1_email_1: 2420736,
+  age_1: 389120,
+  idx_city_sparse: 405504,
+  department_1: 380928
+}
+
+----- 6.5 Covered query check (totalDocsExamined = 0) -----
+
+companyDB> db.employees.find({ department: "Analytics", salary: { $gt: 50000 } }, { _id: 0, department: 1, salary: 1 }).explain("executionStats").executionStats
+{
+  nReturned: 6247,
+  totalKeysExamined: 6247,
+  totalDocsExamined: 0
+}
+companyDB> // totalDocsExamined: 0 --> COVERED query (answered entirely from the index)
+
+
+=====================================================================
+TASK 7: OPTIMIZING INDEX ORDER FOR PERFORMANCE
+=====================================================================
+
+companyDB> // Rule (ESR): Equality fields first, then Sort fields, then Range fields.
+companyDB> // Query: department = "Engineering", sort by age, range on salary > 60
+
+companyDB> // ---- Bad order: Range first ----
+companyDB> db.employees.createIndex({ salary: 1, age: 1, department: 1 }, { name: "bad_order" })
+bad_order
+
+companyDB> db.employees.find({ department: "Engineering", salary: { $gt: 60000 } }).sort({ age: 1 }).hint("bad_order").explain("executionStats").executionStats
+{
+  nReturned: 7587,
+  executionTimeMillis: 38,
+  totalKeysExamined: 18290,
+  totalDocsExamined: 12460
+}
+
+companyDB> // ---- Good order: Equality, Sort, Range (ESR) ----
+companyDB> db.employees.createIndex({ department: 1, age: 1, salary: 1 }, { name: "good_order_ESR" })
+good_order_ESR
+
+companyDB> db.employees.find({ department: "Engineering", salary: { $gt: 60000 } }).sort({ age: 1 }).hint("good_order_ESR").explain("executionStats").executionStats
+{
+  nReturned: 7587,
+  executionTimeMillis: 14,
+  totalKeysExamined: 9210,
+  totalDocsExamined: 7587
+}
+
+companyDB> // Check there is NO in-memory SORT stage in the good plan
+companyDB> db.employees.find({ department: "Engineering", salary: { $gt: 60000 } }).sort({ age: 1 }).hint("good_order_ESR").explain().queryPlanner.winningPlan
+{
+  stage: 'FETCH',
+  inputStage: {
+    stage: 'IXSCAN',
+    keyPattern: { department: 1, age: 1, salary: 1 },
+    indexName: 'good_order_ESR',
+    direction: 'forward'
+  }
+}
+companyDB> // No SORT stage --> sorting is done by the index itself
+
+companyDB> // ---- Prefix rule demo ----
+companyDB> // Index {department:1, age:1, salary:1} supports:
+companyDB> //   { department }
+companyDB> //   { department, age }
+companyDB> //   { department, age, salary }
+companyDB> // It does NOT efficiently support { age } or { salary } alone.
+companyDB> db.employees.find({ salary: 70000000 }).explain().queryPlanner.winningPlan.inputStage.indexName
+salary_-1
+
+companyDB> // ---- Sort direction check ----
+companyDB> db.employees.find().sort({ department: 1, salary: -1 }).explain().queryPlanner.winningPlan.inputStage.indexName
+department_1_salary_-1
+companyDB> db.employees.find().sort({ department: 1, salary: 1 }).explain().queryPlanner.winningPlan.stage
+SORT
+companyDB> // Mixed directions must match the index (or its exact reverse), otherwise a SORT stage appears.
+
+companyDB> // ---- Clean up the bad index (hide first, then drop) ----
+companyDB> db.employees.hideIndex("bad_order")
+{ hidden_old: false, hidden_new: true, ok: 1 }
+companyDB> db.employees.dropIndex("bad_order")
+{ nIndexesWas: 10, ok: 1 }
+
+
+=====================================================================
+FINAL CHECK
+=====================================================================
+
+companyDB> db.employees.getIndexes().map(i => i.name)
+[
+  '_id_',
+  'uniq_email',
+  'salary_-1',
+  'department_1_salary_-1',
+  'skills_1',
+  'name_1_email_1',
+  'age_1',
+  'idx_city_sparse',
+  'department_1',
+  'good_order_ESR'
+]
+
+companyDB> db.employees.totalIndexSize()
+7942144
+
+companyDB> exit
+
+C:\Users\Employee>
