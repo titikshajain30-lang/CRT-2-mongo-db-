@@ -1,0 +1,19 @@
+{
+  "name": "frame-mongodb-demo",
+  "version": "1.0.0",
+  "description": "Instagram-like photo app built on MongoDB (CRUD, indexes, replication, backup, tests)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/",
+    "seed": "node scripts/seed.js",
+    "seed:clear": "node scripts/seed.js --clear"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "mongoose": "^8.5.1",
+    "multer": "^1.4.5-lts.1"
+  }
+}
